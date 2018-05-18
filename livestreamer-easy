@@ -1,0 +1,187 @@
+#!/usr/bin/python3
+
+# TODO:
+# it's become apparent I don't know how subprocess works. so test a
+# livestreamer subprocess in a shell and then get it to work here.
+
+from collections import deque
+
+import argparse
+import os
+import pickle
+import subprocess
+import sys
+import textwrap
+
+# constants
+VERSION = '1.0'
+DATA_FILE_NAME = 'livestreamer-easy-data.p'
+PREVIOUS_STREAMS_MAX_LENGTH = 5
+
+# load previously saved data
+readVersion = None
+savedTwitchOauthToken = None
+previousStreams = deque([[],[],[],[],[]], PREVIOUS_STREAMS_MAX_LENGTH)
+
+while True:
+    try:
+        with open(DATA_FILE_NAME, 'rb') as dataFile:
+            readVersion, savedTwitchOauthToken, previousStreams = pickle.load(
+                    dataFile)
+            # will save same token we loaded unless we receive a new token
+            twitchOauthTokenToSave = savedTwitchOauthToken
+            if readVersion != VERSION:
+                raise UnsupportedDataError
+    except IOError:
+        print('No data file found, creating one now...')
+        try:
+            with open(DATA_FILE_NAME, 'wb') as dataFile:
+                # this just dumps empty data, as the variables have not been
+                # changed since they were initialized.
+                pickle.dump([VERSION, savedTwitchOauthToken, previousStreams],
+                        dataFile)
+        except IOError:
+            print(wrapper.fill(textwrap.dedent(
+                    '''Unable to create data file. Will not save recently
+                    opened streams or saved oauth tokens.''')))
+    except UnsupportedDataError:
+        print(wrapper.fill(textwrap.dedent(
+                '''You have saved data that is not properly formatted. This is
+                most likely data from an older version of livestreamer-easy. We
+                will rename ''', DATA_FILE_NAME, ''' to ''', DATA_FILE_NAME,
+                '''.old and create a new, empty data file. In the future we
+                will migrate this data from the old version to the new version,
+                but until this is supported you may access this data by using
+                python's pickle.load() function.''')))
+        os.rename(DATA_FILE_NAME, DATA_FILE_NAME + '.old')
+    break
+
+# print previously used streams
+if len(sys.argv) == 1:
+    # i = 1
+    # for stream in previousStreams:
+    # print(previousStreams)
+    for i in range(4,-1,-1):
+        print(str(PREVIOUS_STREAMS_MAX_LENGTH - i) + '.' , end=' ')
+        for part in previousStreams[i]:
+            print(part, end=' ')
+        print()
+
+    print('Currently saved twitch oauth token:', savedTwitchOauthToken)
+    print()
+
+# set up argparser
+parser = argparse.ArgumentParser(description=
+        '''Open a stream in livestreamer with the specified quality. Saves the
+        most recent 5 streams''')
+
+argumentGroup = parser.add_mutually_exclusive_group(required=True)
+argumentGroup.add_argument('-u', '--url', help='url to be streamed')
+argumentGroup.add_argument('-p', '--url-position', type=int, help='''position
+        of a previously used url in the list ouput when running
+        livestreamer-easy with no arguments.''')
+argumentGroup.add_argument('-s', '--save-twitch-oauth-token', help='''twitch oauth
+        token to save and future twitch streams unless otherwise specified''')
+parser.add_argument('-q', '--quality', help='ex. best, 720p, 1080p60',
+        default='best')
+parser.add_argument('-t', '--twitch-oauth-token', help='''single use oauth
+            token for twitch''')
+
+args = parser.parse_args()
+
+# initialize objects we'll use later
+wrapper = textwrap.TextWrapper()
+
+class UnsupportedDataError(Exception):
+    pass
+
+# variables for livestreamer command
+finalCommand = ['livestreamer']
+twitchOauthToken = None
+twitchOauthTokenToSave = None
+
+if args.twitch_oauth_token is not None:
+    twitchOauthToken = args.twitch_oauth_token
+elif savedTwitchOauthToken is not None:
+    twitchOauthToken = savedTwitchOauthToken
+    
+if args.url_position is not None:
+    finalCommand = previousStreams[PREVIOUS_STREAMS_MAX_LENGTH -
+            args.url_position]
+elif args.save_twitch_oauth_token is not None:
+    # got a new token! Change twitchOauthTokenToSave so that the saved data is
+    # overwritten
+    twitchOauthTokenToSave = args.save_twitch_oauth_token
+    finalCommand = []
+    print('Twitch oauth token saved.')
+else:
+    if 'www.twitch.tv' in args.url:
+        if twitchOauthToken is not None:
+            finalCommand.append('--twitch-oauth-token')
+            finalCommand.append(twitchOauthToken)
+        else:
+            print(wrapper.fill(textwrap.dedent(
+                '''Warning: using twitch without an oauth token. This will
+                likely cause unexpected behavior or failure to load streams. In
+                order to get an oauth token, do the following:''')))
+            print('  ', wrapper.fill(textwrap.dedent(
+                '''  1) Run "livestreamer --twitch-oauth-authenticate". This will
+                open a window in your default browser asking you to log in to
+                twitch. Log in and you will be redirected to a page indicating
+                that the "page does not exist"''')))
+            print('  ', wrapper.fill(textwrap.dedent(
+                '''2) the address bar will part that says "access_token=
+                xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx. Copy everything after the "="
+                and before the next "&". This is your TWITCH_OAUTH_TOKEN.''')))
+            print('  ', wrapper.fill(textwrap.dedent(
+                '''3) before attempting to watch another stream, I recommend
+                running "livestreamer-easy -s TWITCH_OAUTH_TOKEN" to save your
+                oauth key to be used for all twitch streams.  Alternatively,
+                you can run livestreamer-easy -u URL -t TWITCH_OAUTH_TOKEN to
+                use the oauth token for only the current stream.''')))
+    
+    finalCommand.append(args.url)
+
+    if args.quality is None:
+        print(wrapper.fill(textwrap.dedent(
+                '''Retrieving best quality of stream as reported by service. You
+                may specify a quality by adding it with the -q argument.''')))
+        finalCommand.append('best')
+    else:
+        finalCommand.append(args.quality)
+    
+    
+if finalCommand != []:
+    # print('executing "', end=' ')
+    # for part in finalCommand:
+    #     print(part, end=' ')
+    
+    print('executing the following command:')
+    for part in finalCommand:
+        print(part, end=' ')
+
+    completedLivestreamerProcess = subprocess.run(finalCommand)
+    saveThisStream = True
+    if (completedLivestreamerProcess.returncode != 0 and
+            args.url_position is None):
+        print(wrapper.fill(textwrap.dedent(
+                '''livestreamer process returned a non-zero exit code... do you
+                still want to save this stream with its current settings?''')))
+        answer = None
+        while(answer != 'y' and answer != 'n'):
+            answer = input('(y/n) ')
+        if answer == 'n':
+            saveThisStream = False
+    
+    if saveThisStream:
+        # saves the full command if it isn't a duplicate. Most recently used
+        # commands get the most recent spot in the deque
+        try:
+            previousStreams.remove(finalCommand)
+        except ValueError:
+            pass
+        previousStreams.append(finalCommand)
+
+with open(DATA_FILE_NAME, 'wb') as dataFile:
+    pickle.dump([VERSION, twitchOauthTokenToSave, previousStreams], dataFile)
+
